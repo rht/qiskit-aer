@@ -137,6 +137,55 @@ __global__ void dev_apply_function_sum(double *pReduceBuffer, kernel_t func,
   }
 }
 
+// Version with offset for split launches that exceed max grid size
+template <typename data_t, typename kernel_t>
+__global__ void dev_apply_function_sum_with_offset(double *pReduceBuffer, kernel_t func,
+                                                   uint_t buf_offset, uint_t count, uint_t thread_offset) {
+  // One cache entry per warp/wavefront
+  __shared__ double cache[_MAX_THD / _WS];
+  double sum;
+  uint_t i, j, nw;
+
+  i = threadIdx.x + blockIdx.x * blockDim.x;
+  if (i >= count)
+    return;
+
+  uint_t global_i = i + thread_offset;
+  if (!func.check_conditional(global_i))
+    return;
+
+  sum = func(global_i);
+
+  // reduce in warp
+  nw = min(blockDim.x, _WS);
+  for (j = 1; j < nw; j *= 2) {
+    sum += __shfl_xor_sync(0xffffffff, sum, j, 32);
+  }
+
+  if (blockDim.x > _WS) {
+    // reduce in thread block
+    if ((threadIdx.x & (_WS - 1)) == 0) {
+      cache[(threadIdx.x / _WS)] = sum;
+    }
+    __syncthreads();
+    if (threadIdx.x < _WS) {
+      if (threadIdx.x < ((blockDim.x + _WS - 1) / _WS))
+        sum = cache[threadIdx.x];
+      else
+        sum = 0.0;
+
+      // reduce in warp
+      nw = _WS;
+      for (j = 1; j < nw; j *= 2) {
+        sum += __shfl_xor_sync(0xffffffff, sum, j, 32);
+      }
+    }
+  }
+  if (threadIdx.x == 0) {
+    pReduceBuffer[blockIdx.x + buf_offset] = sum;
+  }
+}
+
 template <typename data_t, typename kernel_t>
 __global__ void
 dev_apply_function_sum_with_cache(double *pReduceBuffer, kernel_t func,
@@ -190,6 +239,63 @@ dev_apply_function_sum_with_cache(double *pReduceBuffer, kernel_t func,
   }
   if (threadIdx.x == 0) {
     pReduceBuffer[blockIdx.x + buf_size * iChunk] = sum;
+  }
+}
+
+// Version with offset for split launches that exceed max grid size
+template <typename data_t, typename kernel_t>
+__global__ void
+dev_apply_function_sum_with_cache_with_offset(double *pReduceBuffer, kernel_t func,
+                                              uint_t buf_offset, uint_t count, uint_t thread_offset) {
+  // One cache entry per thread.
+  __shared__ thrust::complex<data_t> cache[_MAX_THD];
+  uint_t i, idx;
+  uint_t j, nw;
+  double sum;
+
+  i = threadIdx.x + blockIdx.x * blockDim.x;
+  if (i >= count)
+    return;
+
+  uint_t global_i = i + thread_offset;
+  if (!func.check_conditional(global_i))
+    return;
+
+  idx = func.thread_to_index(global_i);
+
+  cache[threadIdx.x] = func.data()[idx];
+  __syncthreads();
+
+  sum = func.run_with_cache_sum(threadIdx.x, idx, cache);
+
+  // reduce in warp
+  nw = min(blockDim.x, _WS);
+  for (j = 1; j < nw; j *= 2) {
+    sum += __shfl_xor_sync(0xffffffff, sum, j, 32);
+  }
+
+  if (blockDim.x > _WS) {
+    // reduce in thread block
+    __syncthreads();
+    if ((threadIdx.x & (_WS - 1)) == 0) {
+      ((double *)cache)[(threadIdx.x / _WS)] = sum;
+    }
+    __syncthreads();
+    if (threadIdx.x < _WS) {
+      if (threadIdx.x < ((blockDim.x + _WS - 1) / _WS))
+        sum = ((double *)cache)[threadIdx.x];
+      else
+        sum = 0.0;
+
+      // reduce in warp
+      nw = _WS;
+      for (j = 1; j < nw; j *= 2) {
+        sum += __shfl_xor_sync(0xffffffff, sum, j, 32);
+      }
+    }
+  }
+  if (threadIdx.x == 0) {
+    pReduceBuffer[blockIdx.x + buf_offset] = sum;
   }
 }
 

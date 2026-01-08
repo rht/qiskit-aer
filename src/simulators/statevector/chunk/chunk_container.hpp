@@ -543,8 +543,28 @@ void ChunkContainer<data_t>::ExecuteSum(double *pSum, Function func,
             nb = (nt + QV_CUDA_NUM_THREADS - 1) / QV_CUDA_NUM_THREADS;
             nt = QV_CUDA_NUM_THREADS;
           }
-          dev_apply_function_sum_with_cache<data_t, Function>
-              <<<nb, nt, 0, strm>>>(buf, func, buf_size, ntotal);
+          // Check if grid size exceeds hardware limit and split if needed
+          uint_t max_blocks_per_launch = QV_MAX_GRID_SIZE / nt;
+          if (nb <= max_blocks_per_launch) {
+            dev_apply_function_sum_with_cache<data_t, Function>
+                <<<nb, nt, 0, strm>>>(buf, func, buf_size, ntotal);
+          } else {
+            // Split into multiple launches to stay within grid size limit
+            uint_t threads_per_launch = max_blocks_per_launch * nt;
+            uint_t thread_offset = 0;
+            uint_t buf_offset = 0;
+            nb = 0;  // Reset nb to track total blocks for reduction
+            while (thread_offset < ntotal) {
+              uint_t remaining = ntotal - thread_offset;
+              uint_t launch_threads = (remaining > threads_per_launch) ? threads_per_launch : remaining;
+              uint_t launch_blocks = (launch_threads + nt - 1) / nt;
+              dev_apply_function_sum_with_cache_with_offset<data_t, Function>
+                  <<<launch_blocks, nt, 0, strm>>>(buf, func, buf_offset, launch_threads, thread_offset);
+              thread_offset += launch_threads;
+              buf_offset += launch_blocks;
+              nb += launch_blocks;
+            }
+          }
         }
       } else {
         nt = size;
@@ -554,8 +574,28 @@ void ChunkContainer<data_t>::ExecuteSum(double *pSum, Function func,
             nb = (nt + QV_CUDA_NUM_THREADS - 1) / QV_CUDA_NUM_THREADS;
             nt = QV_CUDA_NUM_THREADS;
           }
-          dev_apply_function_sum<data_t, Function>
-              <<<nb, nt, 0, strm>>>(buf, func, buf_size, ntotal);
+          // Check if grid size exceeds hardware limit and split if needed
+          uint_t max_blocks_per_launch = QV_MAX_GRID_SIZE / nt;
+          if (nb <= max_blocks_per_launch) {
+            dev_apply_function_sum<data_t, Function>
+                <<<nb, nt, 0, strm>>>(buf, func, buf_size, ntotal);
+          } else {
+            // Split into multiple launches to stay within grid size limit
+            uint_t threads_per_launch = max_blocks_per_launch * nt;
+            uint_t thread_offset = 0;
+            uint_t buf_offset = 0;
+            nb = 0;  // Reset nb to track total blocks for reduction
+            while (thread_offset < ntotal) {
+              uint_t remaining = ntotal - thread_offset;
+              uint_t launch_threads = (remaining > threads_per_launch) ? threads_per_launch : remaining;
+              uint_t launch_blocks = (launch_threads + nt - 1) / nt;
+              dev_apply_function_sum_with_offset<data_t, Function>
+                  <<<launch_blocks, nt, 0, strm>>>(buf, func, buf_offset, launch_threads, thread_offset);
+              thread_offset += launch_threads;
+              buf_offset += launch_blocks;
+              nb += launch_blocks;
+            }
+          }
         }
       }
       cudaError_t err = cudaGetLastError();
