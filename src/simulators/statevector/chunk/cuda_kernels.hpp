@@ -66,6 +66,29 @@ __global__ void dev_apply_function_with_cache(kernel_t func, uint_t count) {
   func.run_with_cache(i, idx, cache);
 }
 
+// Version with offset for split launches that exceed max grid size
+template <typename data_t, typename kernel_t>
+__global__ void dev_apply_function_with_cache_with_offset(kernel_t func, uint_t count, uint_t offset) {
+  // One cache entry per thread.
+  __shared__ thrust::complex<data_t> cache[_MAX_THD];
+  uint_t i, idx;
+
+  i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i >= count)
+    return;
+
+  uint_t global_i = i + offset;
+  if (!func.check_conditional(global_i))
+    return;
+
+  idx = func.thread_to_index(global_i);
+
+  cache[threadIdx.x] = func.data()[idx];
+  __syncthreads();
+
+  func.run_with_cache(global_i, idx, cache);
+}
+
 template <typename data_t, typename kernel_t>
 __global__ void dev_apply_function_sum(double *pReduceBuffer, kernel_t func,
                                        uint_t buf_size, uint_t count) {
