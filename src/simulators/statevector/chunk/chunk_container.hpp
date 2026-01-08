@@ -47,6 +47,7 @@ DISABLE_WARNING_POP
 #define AER_DUMMY_BUFFERS 4 // reserved storage for parameters
 
 #define QV_CUDA_NUM_THREADS 1024
+#define QV_MAX_GRID_SIZE 0xFFFFFFFFull  // Max grid size (work-items) for HIP/CUDA
 #define QV_MAX_REGISTERS 10
 #define QV_MAX_BLOCKED_GATES 64
 
@@ -447,7 +448,22 @@ void ChunkContainer<data_t>::Execute(Function func, uint_t iChunk,
           nb = (nt + QV_CUDA_NUM_THREADS - 1) / QV_CUDA_NUM_THREADS;
           nt = QV_CUDA_NUM_THREADS;
         }
-        dev_apply_function<data_t, Function><<<nb, nt, 0, strm>>>(func, ntotal);
+        // Check if grid size exceeds hardware limit and split if needed
+        uint_t max_blocks_per_launch = QV_MAX_GRID_SIZE / nt;
+        if (nb <= max_blocks_per_launch) {
+          dev_apply_function<data_t, Function><<<nb, nt, 0, strm>>>(func, ntotal);
+        } else {
+          // Split into multiple launches to stay within grid size limit
+          uint_t threads_per_launch = max_blocks_per_launch * nt;
+          uint_t offset = 0;
+          while (offset < ntotal) {
+            uint_t remaining = ntotal - offset;
+            uint_t launch_threads = (remaining > threads_per_launch) ? threads_per_launch : remaining;
+            uint_t launch_blocks = (launch_threads + nt - 1) / nt;
+            dev_apply_function_with_offset<data_t, Function><<<launch_blocks, nt, 0, strm>>>(func, launch_threads, offset);
+            offset += launch_threads;
+          }
+        }
       }
     }
     cudaError_t err = cudaGetLastError();

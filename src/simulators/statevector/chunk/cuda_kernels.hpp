@@ -32,6 +32,19 @@ __global__ void dev_apply_function(kernel_t func, uint_t count) {
   }
 }
 
+// Version with offset for split launches that exceed max grid size
+template <typename data_t, typename kernel_t>
+__global__ void dev_apply_function_with_offset(kernel_t func, uint_t count, uint_t offset) {
+  uint_t i;
+
+  i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i < count) {
+    uint_t global_i = i + offset;
+    if (func.check_conditional(global_i))
+      func(global_i);
+  }
+}
+
 template <typename data_t, typename kernel_t>
 __global__ void dev_apply_function_with_cache(kernel_t func, uint_t count) {
   // One cache entry per thread.
