@@ -837,15 +837,64 @@ reg_t DeviceChunkContainer<data_t>::sample_measure(
 
 #ifdef AER_THRUST_GPU
 
-  if (dot)
-    thrust::transform_inclusive_scan(thrust_gpu::par.on(stream(iChunk)),
-                                     iter.begin(), iter.end(), iter.begin(),
-                                     complex_dot_scan<data_t>(),
-                                     thrust::plus<thrust::complex<data_t>>());
-  else
-    thrust::inclusive_scan(thrust_gpu::par.on(stream(iChunk)), iter.begin(),
-                           iter.end(), iter.begin(),
-                           thrust::plus<thrust::complex<data_t>>());
+  // Maximum elements per scan to avoid grid size overflow on HIP/ROCm
+  // At 32+ qubits, state vector size exceeds what Thrust can handle in one launch
+  constexpr uint_t MAX_SCAN_CHUNK_SIZE = 1ull << 30;  // ~1 billion elements
+  uint_t iter_size = iter.end() - iter.begin();
+
+  if (iter_size > MAX_SCAN_CHUNK_SIZE) {
+    // Chunked scan for large state vectors (32+ qubits)
+    // Split into chunks, scan each, then propagate prefix sums
+    uint_t num_chunks = (iter_size + MAX_SCAN_CHUNK_SIZE - 1) / MAX_SCAN_CHUNK_SIZE;
+    thrust::complex<data_t> running_sum(0.0, 0.0);
+
+    for (uint_t chunk_idx = 0; chunk_idx < num_chunks; chunk_idx++) {
+      uint_t chunk_start = chunk_idx * MAX_SCAN_CHUNK_SIZE;
+      uint_t chunk_end = std::min(chunk_start + MAX_SCAN_CHUNK_SIZE, iter_size);
+
+      auto chunk_begin = iter.begin() + chunk_start;
+      auto chunk_end_iter = iter.begin() + chunk_end;
+
+      // Run inclusive scan on this chunk
+      if (dot)
+        thrust::transform_inclusive_scan(thrust_gpu::par.on(stream(iChunk)),
+                                         chunk_begin, chunk_end_iter, chunk_begin,
+                                         complex_dot_scan<data_t>(),
+                                         thrust::plus<thrust::complex<data_t>>());
+      else
+        thrust::inclusive_scan(thrust_gpu::par.on(stream(iChunk)),
+                               chunk_begin, chunk_end_iter, chunk_begin,
+                               thrust::plus<thrust::complex<data_t>>());
+
+      // Add running sum from previous chunks to this chunk
+      if (chunk_idx > 0) {
+        // Use constant_iterator to add the prefix to all elements
+        thrust::constant_iterator<thrust::complex<data_t>> prefix_iter(running_sum);
+        thrust::transform(thrust_gpu::par.on(stream(iChunk)),
+                          chunk_begin, chunk_end_iter, prefix_iter,
+                          chunk_begin, thrust::plus<thrust::complex<data_t>>());
+      }
+
+      // Get the last element of this chunk to use as prefix for next chunk
+      // Need to synchronize to get the value from device
+      cudaStreamSynchronize(stream(iChunk));
+      thrust::complex<data_t> chunk_last;
+      cudaMemcpy(&chunk_last, thrust::raw_pointer_cast(&*(chunk_end_iter - 1)),
+                 sizeof(thrust::complex<data_t>), cudaMemcpyDeviceToHost);
+      running_sum = chunk_last;
+    }
+  } else {
+    // Original single-launch path for smaller state vectors
+    if (dot)
+      thrust::transform_inclusive_scan(thrust_gpu::par.on(stream(iChunk)),
+                                       iter.begin(), iter.end(), iter.begin(),
+                                       complex_dot_scan<data_t>(),
+                                       thrust::plus<thrust::complex<data_t>>());
+    else
+      thrust::inclusive_scan(thrust_gpu::par.on(stream(iChunk)), iter.begin(),
+                             iter.end(), iter.begin(),
+                             thrust::plus<thrust::complex<data_t>>());
+  }
 
   uint_t i, nshots, size;
   uint_t iBuf = 0;
